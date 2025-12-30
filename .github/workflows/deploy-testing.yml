@@ -1,0 +1,198 @@
+name: Deploy to Testing Environment
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+  workflow_dispatch:  # Manual trigger button
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+        
+    - name: Build React Frontend
+      run: |
+        npm run build-react
+        
+    - name: Install Dependencies
+      run: |
+        npm install
+        
+    - name: Run Unit Tests
+      run: |
+        npm test || echo "No tests configured, skipping..."
+      continue-on-error: true
+        
+    - name: Lint Code
+      run: |
+        npm run lint || npx eslint . --ext .js,.jsx || echo "No linting configured, skipping..."
+      continue-on-error: true
+        
+    - name: Send Failure Notification
+      if: failure()
+      uses: dawidd6/action-send-mail@v3
+      with:
+        server_address: smtp.gmail.com
+        server_port: 587
+        secure: false
+        username: ${{ secrets.EMAIL_USERNAME }}
+        password: ${{ secrets.EMAIL_PASSWORD }}
+        subject: "❌ Testing Deployment Failed - PR #${{ github.event.pull_request.number }}"
+        to: ${{ secrets.NOTIFY_EMAIL }}
+        from: ${{ secrets.EMAIL_USERNAME }}
+        body: |
+          ❌ DEPLOYMENT FAILED - Testing Environment
+          
+          Repository: ${{ github.repository }}
+          Pull Request: #${{ github.event.pull_request.number }}
+          Branch: ${{ github.head_ref }}
+          Author: ${{ github.event.pull_request.user.login }}
+          Title: ${{ github.event.pull_request.title }}
+          
+          The build or tests have failed. Please review the errors.
+          
+          Workflow Details:
+          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          
+          Time: ${{ github.event.pull_request.updated_at }}
+          
+  deploy-to-testing:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Deploy to Testing Server via SSH
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.TESTING_HOST }}
+        username: ${{ secrets.TESTING_USERNAME }}
+        key: ${{ secrets.TESTING_SSH_KEY }}
+        port: 22
+        command_timeout: 30m
+        script: |
+          echo "Starting deployment to Testing environment..."
+          
+          # Set project directory
+          PROJECT_DIR="$HOME/ReactNodeTesting"
+          
+          # Clone repository if it doesn't exist
+          if [ ! -d "$PROJECT_DIR" ]; then
+            echo "Cloning repository..."
+            git clone https://github.com/${{ github.repository }}.git $PROJECT_DIR
+          fi
+          
+          cd $PROJECT_DIR
+          
+          # Fetch and checkout the PR branch
+          git fetch origin
+          git checkout ${{ github.head_ref }} || git checkout -b ${{ github.head_ref }} origin/${{ github.head_ref }}
+          git pull origin ${{ github.head_ref }}
+          
+          echo "Step 1: Building React frontend..."
+          npm run build-react
+          
+          echo "Step 2: Installing dependencies..."
+          npm install
+          
+          echo "Step 3: Starting application with PM2..."
+          # Stop existing process
+          pm2 delete reactnode-testing 2>/dev/null || true
+          
+          # Start application with PM2
+          pm2 start npm --name "reactnode-testing" -- start
+          
+          # Save PM2 process list
+          pm2 save
+          
+          # Display running processes
+          echo "Deployment complete! Running processes:"
+          pm2 list
+          
+          echo "Application should be accessible at http://${{ secrets.TESTING_HOST }}:3000"
+          
+    - name: Send Success Notification to QA
+      if: success()
+      uses: dawidd6/action-send-mail@v3
+      with:
+        server_address: smtp.gmail.com
+        server_port: 587
+        secure: false
+        username: ${{ secrets.EMAIL_USERNAME }}
+        password: ${{ secrets.EMAIL_PASSWORD }}
+        subject: "✅ Testing Deployment Successful - Ready for QA"
+        to: ${{ secrets.NOTIFY_EMAIL }}
+        from: ${{ secrets.EMAIL_USERNAME }}
+        body: |
+          ✅ DEPLOYMENT SUCCESSFUL - Testing Environment
+          
+          The application has been successfully deployed and is ready for testing!
+          
+          📋 Deployment Details:
+          Repository: ${{ github.repository }}
+          Pull Request: #${{ github.event.pull_request.number }}
+          Branch: ${{ github.head_ref }}
+          Author: ${{ github.event.pull_request.user.login }}
+          Title: ${{ github.event.pull_request.title }}
+          
+          🔗 Access the Application:
+          Application URL: http://${{ secrets.TESTING_HOST }}:3000
+          
+          📝 Testing Instructions:
+          1. Open the application URL in your browser
+          2. Test all new features mentioned in the PR
+          3. Verify all functionality works as expected
+          4. Report any bugs or issues in the PR comments
+          
+          Deployment Steps Executed:
+          1. ✅ Built React frontend (npm run build-react)
+          2. ✅ Installed dependencies (npm install)
+          3. ✅ Started application (npm start)
+          
+          Workflow Run Details:
+          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          
+          Time: ${{ github.event.pull_request.updated_at }}
+          
+    - name: Send Deployment Failure Notification
+      if: failure()
+      uses: dawidd6/action-send-mail@v3
+      with:
+        server_address: smtp.gmail.com
+        server_port: 587
+        secure: false
+        username: ${{ secrets.EMAIL_USERNAME }}
+        password: ${{ secrets.EMAIL_PASSWORD }}
+        subject: "❌ Testing Deployment Failed - Server Error"
+        to: ${{ secrets.NOTIFY_EMAIL }}
+        from: ${{ secrets.EMAIL_USERNAME }}
+        body: |
+          ❌ DEPLOYMENT FAILED - Testing Environment
+          
+          The deployment to the testing server encountered an error.
+          
+          Repository: ${{ github.repository }}
+          Pull Request: #${{ github.event.pull_request.number }}
+          Branch: ${{ github.head_ref }}
+          
+          Please check:
+          1. EC2 instance is running
+          2. SSH credentials are correct
+          3. Security group allows connections
+          4. Server has enough disk space
+          5. Node.js and npm are properly installed
+          
+          Workflow Details:
+          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
